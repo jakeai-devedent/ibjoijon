@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>마법사 점프맵: 이지 투 헬</title>
+    <style>
+        body {
+            margin: 0; padding: 0; background-color: #0d0d1a;
+            background-image: url('http://googleusercontent.com/image_generation_content/202');
+            background-size: cover;
+            background-position: center;
+            background-attachment: fixed;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: 'Malgun Gothic', sans-serif;
+        }
+        canvas {
+            background-color: rgba(0, 0, 0, 0.6);
+            border: 3px solid #3498db;
+            box-shadow: 0 0 30px #3498db, inset 0 0 20px rgba(52, 152, 219, 0.3);
+            border-radius: 10px;
+            transition: border-color 0.5s, box-shadow 0.5s;
+        }
+        #uiLayer {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: white;
+            text-align: center;
+            text-shadow: 2px 2px 4px black;
+            pointer-events: none;
+        }
+        #stageTitle { font-weight: bold; font-size: 24px; margin-bottom: 5px; transition: color 0.5s; }
+        #message {
+            position: absolute;
+            top: 40%; left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 35px;
+            font-weight: bold;
+            color: #ff4757;
+            text-shadow: 0 0 15px #ff0000, 3px 3px 6px black;
+            display: none;
+            text-align: center;
+            pointer-events: none;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="uiLayer">
+        <div id="stageTitle">준비 중...</div>
+        <p>방향키: 좌/우 이동 및 점프</p>
+    </div>
+    
+    <div id="message"></div>
+    <canvas id="gameCanvas" width="900" height="600"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const msgDiv = document.getElementById('message');
+        const titleDiv = document.getElementById('stageTitle');
+
+        let gameState = 'PLAYING'; 
+        let cameraX = 0;
+        let currentStage = 0;
+
+        const player = {
+            x: 50, y: 300, w: 30, h: 40,
+            dx: 0, dy: 0,
+            speed: 0.6, maxSpeed: 6,
+            jumpPower: -13, gravity: 0.5,
+            friction: 0.8, grounded: false,
+            color: '#a64dff'
+        };
+
+        class Platform {
+            constructor(x, y, w, h, type = 'normal') {
+                this.x = x; this.y = y; this.w = w; this.h = h;
+                this.type = type; this.initialX = x; this.isActive = true;
+                if (type === 'moving') { this.vx = 2.5; this.moveRange = 200; } 
+                else if (type === 'disappearing') { this.opacity = 1; this.touched = false; this.timer = 0; }
+            }
+            update() {
+                if (this.type === 'moving') {
+                    this.x += this.vx;
+                    if (this.x > this.initialX + this.moveRange || this.x < this.initialX) this.vx *= -1;
+                } else if (this.type === 'disappearing' && this.touched) {
+                    this.timer++;
+                    this.opacity = Math.max(0, 1 - (this.timer / 40)); 
+                    if (this.timer > 40) this.isActive = false;
+                    if (this.timer > 150) { this.touched = false; this.timer = 0; this.opacity = 1; this.isActive = true; }
+                }
+            }
+            draw(ctx) {
+                if (!this.isActive && this.type !== 'disappearing') return;
+                if (this.type === 'disappearing' && this.opacity === 0) return;
+                ctx.save();
+                ctx.shadowColor = 'rgba(0, 0, 0, 0.8)'; ctx.shadowBlur = 10; ctx.shadowOffsetX = 5; ctx.shadowOffsetY = 5;
+                if (this.type === 'normal') ctx.fillStyle = '#2c3e50'; 
+                else if (this.type === 'ice') ctx.fillStyle = '#81ecec';
+                else if (this.type === 'moving') ctx.fillStyle = '#8e44ad';
+                else if (this.type === 'disappearing') { ctx.fillStyle = `rgba(149, 165, 166, ${this.opacity})`; ctx.shadowColor = 'transparent'; }
+                ctx.fillRect(this.x, this.y, this.w, this.h);
+                ctx.restore();
+            }
+        }
+
+        class Projectile {
+            constructor(x, y, vx, vy, radius = 10) {
+                this.x = x; this.y = y; this.vx = vx; this.vy = vy;
+                this.radius = radius;
+                this.startX = x; this.startY = y;
+                
+                // 속도 계산
+                this.speed = Math.sqrt(vx * vx + vy * vy);
+                
+                // 속도에 따른 색상 설정
+                if (this.speed < 4) {
+                    this.color = '#f1c40f'; this.shadowColor = '#f39c12'; this.rgb = '241, 196, 15'; // 노랑 (느림)
+                } else if (this.speed < 6) {
+                    this.color = '#e67e22'; this.shadowColor = '#d35400'; this.rgb = '230, 126, 34'; // 주황 (보통)
+                } else if (this.speed < 8) {
+                    this.color = '#e74c3c'; this.shadowColor = '#c0392b'; this.rgb = '231, 76, 60'; // 빨강 (빠름)
+                } else {
+                    this.color = '#9b59b6'; this.shadowColor = '#8e44ad'; this.rgb = '155, 89, 182'; // 보라 (매우 빠름)
+                }
+            }
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                if (this.x < this.startX - 1500 || this.x > this.startX + 1500 || this.y > 1000 || this.y < -500) {
+                    this.x = this.startX; this.y = this.startY;
+                }
+            }
+            draw(ctx) {
+                // 1. 발사구(Spawner) 및 조준선 그리기
+                ctx.save();
+                ctx.shadowColor = this.shadowColor; 
+                ctx.shadowBlur = 10;
+                ctx.strokeStyle = this.color;
+                ctx.lineWidth = 2;
+                
+                // 발사구 외곽선
+                ctx.beginPath();
+                ctx.arc(this.startX, this.startY, this.radius + 4, 0, Math.PI * 2);
+                ctx.stroke();
+                
+                // 발사구 내부 (반투명)
+                ctx.fillStyle = `rgba(${this.rgb}, 0.2)`;
+                ctx.fill();
+                
+                // 조준선 (어느 방향으로 날아가는지 표시)
+                ctx.beginPath();
+                ctx.moveTo(this.startX, this.startY);
+                ctx.lineTo(this.startX + (this.vx * 4), this.startY + (this.vy * 4));
+                ctx.stroke();
+                ctx.restore();
+
+                // 2. 투사체 본체 그리기
+                ctx.save();
+                ctx.shadowColor = this.shadowColor; 
+                ctx.shadowBlur = 15;
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // 투사체 코어 (흰색 반짝임 효과)
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius * 0.5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        class Spike {
+            constructor(x, y, w, h) {
+                this.x = x; this.y = y; this.w = w; this.h = h;
+            }
+            draw(ctx) {
+                ctx.save();
+                ctx.fillStyle = '#c0392b';
+                ctx.shadowColor = '#e74c3c';
+                ctx.shadowBlur = 10;
+                
+                // 가시 모양(삼각형 여러 개) 그리기
+                let spikeWidth = 15;
+                let count = Math.max(1, Math.floor(this.w / spikeWidth));
+                let actualWidth = this.w / count;
+                
+                ctx.beginPath();
+                for(let i=0; i<count; i++) {
+                    ctx.moveTo(this.x + i * actualWidth, this.y + this.h);
+                    ctx.lineTo(this.x + i * actualWidth + actualWidth / 2, this.y); // 뾰족한 끝
+                    ctx.lineTo(this.x + (i + 1) * actualWidth, this.y + this.h);
+                }
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        class Chaser {
+            constructor(startX, speed) {
+                this.x = startX; 
+                this.speed = speed;
+            }
+            update() {
+                this.x += this.speed;
+            }
+            draw(ctx, canvasHeight) {
+                ctx.save();
+                // 다가오는 거대한 어둠의 폭풍 효과
+                let grad = ctx.createLinearGradient(this.x, 0, this.x - 150, 0);
+                grad.addColorStop(0, 'rgba(20, 0, 30, 0.95)');
+                grad.addColorStop(1, 'rgba(0, 0, 0, 1)');
+                
+                ctx.fillStyle = grad;
+                // 화면 위아래 넉넉하게 덮기
+                ctx.fillRect(this.x - 2000, -1000, 2000, canvasHeight + 2000);
+                
+                // 폭풍의 경계선(보라색 번개/오라 효과)
+                ctx.fillStyle = '#8e44ad';
+                ctx.shadowColor = '#9b59b6';
+                ctx.shadowBlur = 30;
+                ctx.globalAlpha = 0.5 + Math.sin(Date.now() / 100) * 0.4;
+                ctx.fillRect(this.x - 10, -1000, 10, canvasHeight + 2000);
+                ctx.restore();
+            }
+        }
+
+        let platforms = [];
+        let projectiles = [];
+        let spikes = [];
+        let chaser = null;
+        let goal = { x: 0, y: 0, w: 60, h: 80 };
+
+        // 🌟 빌드업 난이도 1 ~ 7스테이지 🌟
+        const levelData = [
+            { // --- 스테이지 1: Easy ---
+                title: "스테이지 1: 가벼운 발걸음 (Easy)", color: "#2ecc71",
+                startX: 50, startY: 300,
+                goal: { x: 1200, y: 250 },
+                platforms: [
+                    new Platform(0, 500, 250, 20, 'normal'),
+                    new Platform(400, 450, 150, 20, 'normal'),
+                    new Platform(700, 400, 150, 20, 'normal'),
+                    new Platform(1000, 350, 250, 20, 'normal')
+                ],
+                projectiles: []
+            },
+            { // --- 스테이지 2: Normal ---
+                title: "스테이지 2: 얼음과 움직임 (Normal)", color: "#3498db",
+                startX: 50, startY: 300,
+                goal: { x: 1500, y: 300 },
+                platforms: [
+                    new Platform(0, 500, 150, 20, 'normal'),
+                    new Platform(300, 450, 300, 20, 'ice'),
+                    new Platform(750, 450, 100, 20, 'moving'),
+                    new Platform(1200, 400, 200, 20, 'normal'),
+                    new Platform(1450, 380, 150, 20, 'normal')
+                ],
+                projectiles: []
+            },
+            { // --- 스테이지 3: Hard ---
+                title: "스테이지 3: 환영과 불꽃 (Hard)", color: "#f1c40f",
+                startX: 50, startY: 300,
+                goal: { x: 1600, y: 200 },
+                platforms: [
+                    new Platform(0, 500, 150, 20, 'normal'),
+                    new Platform(300, 450, 80, 20, 'disappearing'),
+                    new Platform(500, 400, 80, 20, 'disappearing'),
+                    new Platform(700, 350, 80, 20, 'disappearing'),
+                    new Platform(1000, 350, 200, 20, 'ice'),
+                    new Platform(1400, 300, 200, 20, 'normal')
+                ],
+                projectiles: [
+                    new Projectile(1300, 320, -3, 0) // 느린 노란색 투사체
+                ]
+            },
+            { // --- 스테이지 4: Very Hard ---
+                title: "스테이지 4: 복합 함정 (Very Hard)", color: "#e67e22",
+                startX: 50, startY: 300,
+                goal: { x: 2000, y: 200 },
+                platforms: [
+                    new Platform(0, 500, 100, 20, 'normal'),
+                    new Platform(250, 450, 100, 20, 'moving'),
+                    new Platform(600, 450, 200, 20, 'ice'),
+                    new Platform(950, 400, 60, 20, 'disappearing'),
+                    new Platform(1150, 350, 60, 20, 'disappearing'),
+                    new Platform(1350, 300, 60, 20, 'disappearing'),
+                    new Platform(1650, 350, 150, 20, 'moving'),
+                    new Platform(1950, 280, 200, 20, 'normal')
+                ],
+                projectiles: [
+                    new Projectile(800, 420, -5, 0), // 보통 주황색 투사체
+                    new Projectile(1250, -50, 0, 5), // 위에서 떨어지는 주황색
+                    new Projectile(1450, -100, 0, 5)
+                ]
+            },
+            { // --- 스테이지 5: Hell ---
+                title: "스테이지 5: 지옥 (Hell)", color: "#ff4757",
+                startX: 50, startY: 300,
+                goal: { x: 3000, y: 150 },
+                platforms: [
+                    new Platform(0, 500, 100, 20, 'normal'),
+                    new Platform(250, 450, 40, 20, 'disappearing'),
+                    new Platform(400, 400, 40, 20, 'disappearing'),
+                    new Platform(550, 350, 40, 20, 'disappearing'),
+                    new Platform(750, 300, 150, 20, 'ice'),
+                    new Platform(1050, 250, 60, 20, 'moving'),
+                    new Platform(1350, 200, 60, 20, 'moving'),
+                    new Platform(1700, 250, 200, 20, 'ice'),
+                    new Platform(2050, 200, 50, 20, 'normal'),
+                    new Platform(2300, 150, 50, 20, 'disappearing'),
+                    new Platform(2550, 100, 50, 20, 'disappearing'),
+                    new Platform(2850, 230, 300, 20, 'normal')
+                ],
+                projectiles: [
+                    new Projectile(325, -50, 0, 8.5), // 극악 보라색 (매우 빠름)
+                    new Projectile(475, -100, 0, 8.5),
+                    new Projectile(900, 280, -6.5, 0), // 빨간색 (빠름)
+                    new Projectile(1200, 220, -5, 0), 
+                    new Projectile(1500, 170, -5, 0), 
+                    new Projectile(1800, 230, -7, 0), 
+                    new Projectile(1900, 550, 0, -7), // 밑에서 기습 빨간색
+                    new Projectile(2425, 100, 0, 6.5)   
+                ]
+            },
+            { // --- 스테이지 6: Insane ---
+                title: "스테이지 6: 가시밭길 (Insane)", color: "#c0392b",
+                startX: 50, startY: 300,
+                goal: { x: 1800, y: 250 },
+                platforms: [
+                    new Platform(0, 500, 400, 20, 'normal'),
+                    new Platform(500, 450, 300, 20, 'ice'),
+                    new Platform(900, 400, 100, 20, 'moving'),
+                    new Platform(1200, 350, 400, 20, 'normal')
+                ],
+                projectiles: [
+                    new Projectile(650, 250, 0, 5) // 얼음 발판 위로 떨어지는 투사체
+                ],
+                spikes: [
+                    new Spike(200, 480, 80, 20), // 첫 발판 중간의 가시
+                    new Spike(600, 430, 100, 20), // 얼음 발판 위 가시
+                    new Spike(1300, 330, 50, 20), // 마지막 발판 가시 1
+                    new Spike(1450, 330, 50, 20)  // 마지막 발판 가시 2
+                ]
+            },
+            { // --- 스테이지 7: Nightmare ---
+                title: "스테이지 7: 어둠의 추격 (Nightmare)", color: "#8e44ad",
+                startX: 50, startY: 300,
+                goal: { x: 2200, y: 200 },
+                chaser: { startX: -300, speed: 4.2 }, // 쉴 틈 없이 쫓아오는 속도
+                platforms: [
+                    new Platform(0, 500, 300, 20, 'normal'),
+                    new Platform(400, 450, 200, 20, 'normal'),
+                    new Platform(700, 400, 200, 20, 'disappearing'),
+                    new Platform(1000, 350, 100, 20, 'moving'),
+                    new Platform(1300, 350, 300, 20, 'ice'),
+                    new Platform(1750, 300, 150, 20, 'normal'),
+                    new Platform(2000, 250, 250, 20, 'normal')
+                ],
+                projectiles: [],
+                spikes: [
+                    new Spike(150, 480, 40, 20),
+                    new Spike(480, 430, 40, 20),
+                    new Spike(800, 380, 40, 20),
+                    new Spike(1400, 330, 100, 20)
+                ]
+            }
+        ];
+
+        function loadStage(index) {
+            if (index >= levelData.length) {
+                msgDiv.innerHTML = "👑 완벽한 클리어! 👑<br><span style='font-size:20px; color:white;'>당신은 진정한 마스터입니다.</span>";
+                msgDiv.style.color = "#f1c40f";
+                msgDiv.style.display = 'block';
+                gameState = 'CLEAR_ALL';
+                return;
+            }
+            const data = levelData[index];
+            
+            titleDiv.innerText = data.title;
+            titleDiv.style.color = data.color;
+            canvas.style.borderColor = data.color;
+            canvas.style.boxShadow = `0 0 30px ${data.color}, inset 0 0 20px ${data.color}40`;
+
+            player.x = data.startX; player.y = data.startY;
+            player.dx = 0; player.dy = 0;
+            goal.x = data.goal.x; goal.y = data.goal.y;
+            
+            platforms = data.platforms.map(p => new Platform(p.x, p.y, p.w, p.h, p.type));
+            projectiles = data.projectiles ? data.projectiles.map(p => new Projectile(p.x, p.y, p.vx, p.vy)) : [];
+            
+            spikes = data.spikes ? data.spikes.map(s => new Spike(s.x, s.y, s.w, s.h)) : [];
+            if (data.chaser) {
+                chaser = new Chaser(data.chaser.startX, data.chaser.speed);
+            } else {
+                chaser = null;
+            }
+            
+            cameraX = player.x - canvas.width / 3;
+            gameState = 'PLAYING';
+            msgDiv.style.display = 'none';
+        }
+
+        const keys = { ArrowRight: false, ArrowLeft: false, ArrowUp: false };
+        window.addEventListener('keydown', e => { if (e.code in keys) keys[e.code] = true; });
+        window.addEventListener('keyup', e => { if (e.code in keys) keys[e.code] = false; });
+
+        function die() {
+            gameState = 'GAMEOVER';
+            msgDiv.innerHTML = "💀 YOU DIED 💀<br><span style='font-size:20px; color:white;'>1초 후 재도전...</span>";
+            msgDiv.style.color = "#ff4757";
+            msgDiv.style.display = 'block';
+            setTimeout(() => loadStage(currentStage), 1000);
+        }
+
+        function update() {
+            if (gameState !== 'PLAYING') return;
+
+            if (keys.ArrowRight) player.dx += player.speed;
+            if (keys.ArrowLeft) player.dx -= player.speed;
+            if (player.dx > player.maxSpeed) player.dx = player.maxSpeed;
+            if (player.dx < -player.maxSpeed) player.dx = -player.maxSpeed;
+            if (!keys.ArrowRight && !keys.ArrowLeft) {
+                player.dx *= player.friction;
+                if (Math.abs(player.dx) < 0.1) player.dx = 0;
+            }
+
+            if (keys.ArrowUp && player.grounded) { player.dy = player.jumpPower; player.grounded = false; }
+            player.dy += player.gravity;
+
+            player.x += player.dx;
+            player.grounded = false;
+            player.friction = 0.8;
+
+            platforms.forEach(p => {
+                p.update();
+                if (!p.isActive) return;
+                if (player.x + player.w > p.x && player.x < p.x + p.w &&
+                    player.y + player.h <= p.y + player.dy + 4 && player.y + player.h + player.dy >= p.y) {
+                    player.grounded = true; player.dy = 0; player.y = p.y - player.h;
+                    if (p.type === 'ice') player.friction = 0.99; 
+                    if (p.type === 'moving') player.x += p.vx;
+                    if (p.type === 'disappearing' && !p.touched) p.touched = true;
+                }
+            });
+
+            player.y += player.dy;
+            if (player.x < 0) { player.x = 0; player.dx = 0; }
+
+            let hitboxMargin = 4;
+            projectiles.forEach(proj => {
+                proj.update();
+                let closestX = Math.max(player.x + hitboxMargin, Math.min(proj.x, player.x + player.w - hitboxMargin));
+                let closestY = Math.max(player.y + hitboxMargin, Math.min(proj.y, player.y + player.h - hitboxMargin));
+                let distanceX = proj.x - closestX;
+                let distanceY = proj.y - closestY;
+                if ((distanceX * distanceX + distanceY * distanceY) < (proj.radius * proj.radius)) {
+                    die();
+                }
+            });
+
+            let hitboxMarginSpike = 5;
+            spikes.forEach(s => {
+                if (player.x + player.w - hitboxMarginSpike > s.x && 
+                    player.x + hitboxMarginSpike < s.x + s.w &&
+                    player.y + player.h > s.y && 
+                    player.y + hitboxMarginSpike < s.y + s.h) {
+                    die();
+                }
+            });
+
+            if (chaser) {
+                chaser.update();
+                // 플레이어가 추격자의 X좌표보다 뒤쳐지면 사망
+                if (player.x < chaser.x) {
+                    die();
+                }
+            }
+
+            if (player.x < goal.x + goal.w && player.x + player.w > goal.x &&
+                player.y < goal.y + goal.h && player.y + player.h > goal.y) {
+                gameState = 'CLEAR';
+                currentStage++;
+                msgDiv.innerHTML = "✨ 스테이지 클리어! ✨";
+                msgDiv.style.color = levelData[currentStage] ? levelData[currentStage].color : "#2ecc71";
+                msgDiv.style.display = 'block';
+                setTimeout(() => loadStage(currentStage), 1500);
+            }
+
+            if (player.y > canvas.height + 200) die(); 
+
+            let targetCameraX = player.x - canvas.width / 3;
+            if (targetCameraX < 0) targetCameraX = 0; 
+            cameraX += (targetCameraX - cameraX) * 0.1;
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.save();
+            ctx.translate(-cameraX, 0);
+
+            // 투사체를 발판보다 먼저 그려서, 발사구가 발판 뒤에서 자연스럽게 나오게 배치
+            projectiles.forEach(p => p.draw(ctx));
+            platforms.forEach(p => p.draw(ctx));
+            
+            spikes.forEach(s => s.draw(ctx));
+            if (chaser) {
+                // 추격자는 카메라 좌표계 안에서 캔버스 전체 높이만큼 그립니다.
+                chaser.draw(ctx, canvas.height); 
+            }
+
+            let time = Date.now() / 200;
+            let stageColor = levelData[currentStage] ? levelData[currentStage].color : "#00ffff";
+            ctx.shadowColor = stageColor; ctx.shadowBlur = 20 + Math.sin(time) * 10;
+            ctx.fillStyle = stageColor;
+            ctx.globalAlpha = 0.7 + Math.sin(time) * 0.3;
+            ctx.beginPath(); ctx.ellipse(goal.x + goal.w/2, goal.y + goal.h/2, goal.w/2, goal.h/2, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+            ctx.globalAlpha = 1.0;
+            ctx.beginPath(); ctx.ellipse(goal.x + goal.w/2, goal.y + goal.h/2, goal.w/4, goal.h/1.5, Math.sin(time/2), 0, Math.PI * 2); ctx.fill();
+            ctx.shadowBlur = 0;
+
+            ctx.fillStyle = player.color; ctx.shadowColor = 'rgba(166, 77, 255, 0.8)'; ctx.shadowBlur = 15;
+            ctx.fillRect(player.x, player.y, player.w, player.h);
+            ctx.beginPath(); ctx.moveTo(player.x - 5, player.y); ctx.lineTo(player.x + player.w + 5, player.y); ctx.lineTo(player.x + player.w / 2, player.y - 25); ctx.closePath();
+            ctx.fillStyle = '#331a4d'; ctx.fill();
+
+            ctx.restore();
+        }
+
+        function gameLoop() { update(); draw(); requestAnimationFrame(gameLoop); }
+
+        loadStage(currentStage);
+        gameLoop();
+    </script>
+</body>
+</html>
